@@ -1,0 +1,128 @@
+# Master config for the full 4-stage pipeline.
+#
+# Each stage subsection is consumed by its own trainer. Common settings live at
+# the top so changes propagate (e.g., backbone, dataset, GPUs).
+
+run_root: full_pipeline_v1
+output_root: /mnt/data3/haoming_x_spatial_scratch/latent_reasoning_runs
+
+# ---- shared model + data ----
+model:
+  backbone_id: Qwen/Qwen2.5-VL-7B-Instruct
+  backbone_dtype: bfloat16
+  siglip_path: /mnt/data3/haoming_x_spatial_scratch/latent_reasoning_runs/hf_cache/siglip-base-patch16-224
+  view_idx_pose_dim: 64
+  max_views_per_sample: 4
+  freeze_vision_tower: true
+  lora:
+    enabled: true
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+data:
+  mindcube_root: /home/haoming/mindcube_data
+  train_jsonl: /home/haoming/mindcube_data/raw/MindCube_train.jsonl
+  eval_jsonl: /home/haoming/mindcube_data/raw/MindCube_tinybench.jsonl
+  num_workers: 4
+  prefetch_factor: 2
+
+# ---- per-stage ----
+stage1_align:
+  run_name: full_pipeline_v1_stage1
+  num_train_steps: 500
+  micro_batch_size: 1
+  grad_accum_steps: 4
+  lr_head: 5.0e-4         # head/embeddings only — higher lr OK
+  lr_backbone: 0.0        # backbone fully frozen
+  weight_decay: 0.01
+  warmup_steps: 30
+  cosine_schedule: true
+  loss_lambda_latent: 1.0
+  loss_lambda_text: 0.0   # stage 1 = latent only (no text supervision)
+  loss_lambda_format: 0.0
+  infonce_start_step: 100000  # not used in stage 1
+  infonce_max_weight: 0.0
+  precision: bf16
+  gradient_checkpointing: true
+  ckpt:
+    save_every_n_steps: 250
+    keep_last_n: 2
+    save_optimizer_state: true
+  log_every_n_steps: 10
+
+stage2_ground:
+  run_name: full_pipeline_v1_stage2
+  init_from: full_pipeline_v1_stage1   # load model state from stage1 final
+  num_train_steps: 5000
+  micro_batch_size: 1
+  grad_accum_steps: 4
+  lr_backbone: 2.0e-5
+  lr_heads: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 100
+  cosine_schedule: true
+  loss_lambda_latent: 1.0
+  loss_lambda_text: 1.0
+  loss_lambda_format: 0.5
+  infonce_start_step: 1500
+  infonce_max_weight: 0.3
+  precision: bf16
+  gradient_checkpointing: true
+  ckpt:
+    save_every_n_steps: 500
+    keep_last_n: 2
+    save_optimizer_state: true
+  log_every_n_steps: 10
+
+stage3_e2e:
+  run_name: full_pipeline_v1_stage3
+  init_from: full_pipeline_v1_stage2
+  num_train_steps: 3000
+  micro_batch_size: 1
+  grad_accum_steps: 4
+  lr_backbone: 1.0e-5
+  lr_heads: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 60
+  cosine_schedule: true
+  loss_lambda_latent: 0.0   # KEY: drop latent supervision in stage 3
+  loss_lambda_text: 1.0
+  loss_lambda_format: 0.5
+  precision: bf16
+  gradient_checkpointing: true
+  scheduled_sampling:
+    teacher_init: 0.8       # start at 80% teacher target injection
+    teacher_final: 0.0      # decay to 0 (free generation)
+    decay_over_steps: 2000
+  ckpt:
+    save_every_n_steps: 500
+    keep_last_n: 2
+    save_optimizer_state: true
+  log_every_n_steps: 10
+
+stage4_grpo:
+  run_name: full_pipeline_v1_stage4
+  init_from: full_pipeline_v1_stage3
+  num_train_steps: 1000
+  micro_batch_size: 1
+  num_generations: 4         # rollouts per prompt
+  max_completion_length: 128
+  lr: 5.0e-6
+  beta: 0.04                 # KL coef
+  warmup_steps: 50
+  reward_correct: 1.0
+  reward_format: 0.1
+  precision: bf16
+  ckpt:
+    save_every_n_steps: 200
+    keep_last_n: 2
+
+# ---- 5-hour periodic eval ----
+eval_daemon:
+  interval_hours: 5
+  eval_jsonl: /home/haoming/mindcube_data/raw/MindCube_tinybench.jsonl
+  max_eval_samples: 200      # 200 of 1050 tinybench, ~3-5 min on 1 GPU
+  device: 5                  # NVL — eval daemon uses GPU 5
+  log_path: /mnt/data3/haoming_x_spatial_scratch/latent_reasoning_runs/TRAINING_LOG.md

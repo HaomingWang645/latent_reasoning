@@ -79,13 +79,16 @@ def make_collate_fn(processor: AutoProcessor, lts_id: int, lat_id: int, lte_id: 
         ]
         all_pil = [img for s in samples for img in s.images]
 
+        # Resize images on input to keep image-token count small (each image
+        # at 224x224 -> ~64 image tokens for Qwen2.5-VL). Truncation must NOT
+        # cut the expanded image token spans, so we use a generous max_length.
+        all_pil_resized = [im.resize((224, 224), Image.LANCZOS) for im in all_pil]
         proc_out = processor(
             text=texts,
-            images=all_pil if all_pil else None,
+            images=all_pil_resized if all_pil_resized else None,
             return_tensors="pt",
             padding=True,
-            truncation=True,
-            max_length=2048,
+            truncation=False,
         )
         input_ids = proc_out["input_ids"]
         attention_mask = proc_out["attention_mask"]

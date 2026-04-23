@@ -200,6 +200,7 @@ def main():
         target_dim=0,  # set after building encoders
         dtype=dtype,
         freeze_vision_tower=cfg["model"].get("freeze_vision_tower", True),
+        lora_cfg=cfg["model"].get("lora"),
     )
 
     siglip = FrozenSigLIPEncoder(cfg["model"]["siglip_path"], dtype=dtype)
@@ -362,7 +363,10 @@ def main():
         # --------------------- save ckpt --------------------
         if not args.smoke and (step % cfg["ckpt"]["save_every_n_steps"] == 0 or step == total_steps):
             t0 = time.time()
-            backbone_state = {k: v.detach().cpu() for k, v in handles.model.state_dict().items()}
+            # Only save trainable params (LoRA adapters + new token rows + LM head + latent head).
+            # Frozen base weights are bit-identical to the HF checkpoint and reloaded from there.
+            trainable_names = {n for n, p in handles.model.named_parameters() if p.requires_grad}
+            backbone_state = {k: v.detach().cpu() for k, v in handles.model.state_dict().items() if k in trainable_names}
             head_state = {k: v.detach().cpu() for k, v in handles.latent_head.state_dict().items()}
             opt_state = optimizer.state_dict() if cfg["ckpt"].get("save_optimizer_state", True) else None
             rng_state = {
@@ -378,6 +382,15 @@ def main():
             )
             if is_main():
                 logger.print(f"[ckpt] saved step {step} in {time.time()-t0:.1f}s | disk_usage={ckpt.disk_usage_mb():.1f} MB")
+                # Auto-regen training curve PNG alongside the ckpt
+                try:
+                    import subprocess
+                    subprocess.run(
+                        ["python", str(Path(__file__).parents[2] / "scripts" / "plot_curves.py")],
+                        check=False, capture_output=True, timeout=30,
+                    )
+                except Exception as e:
+                    logger.print(f"[plot] curves regen failed: {e}")
 
     if is_main():
         logger.print("[done] training complete")

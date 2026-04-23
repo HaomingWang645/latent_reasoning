@@ -71,6 +71,7 @@ def build_model(
     target_dim: int,
     dtype: torch.dtype = torch.bfloat16,
     freeze_vision_tower: bool = True,
+    lora_cfg: dict | None = None,
 ) -> ModelHandles:
     processor = AutoProcessor.from_pretrained(backbone_id)
     tokenizer = processor.tokenizer
@@ -101,8 +102,25 @@ def build_model(
             if "visual" in name or "vision_tower" in name:
                 p.requires_grad_(False)
 
+    # Optional LoRA: drops trainable params from ~7.6B to ~30-100M; the new
+    # token embeddings remain trainable as `modules_to_save`.
+    if lora_cfg and lora_cfg.get("enabled", False):
+        from peft import LoraConfig, get_peft_model
+        targets = lora_cfg.get("target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"])
+        lora = LoraConfig(
+            r=lora_cfg.get("r", 16),
+            lora_alpha=lora_cfg.get("alpha", 32),
+            lora_dropout=lora_cfg.get("dropout", 0.05),
+            target_modules=targets,
+            bias="none",
+            modules_to_save=["embed_tokens", "lm_head"],
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, lora)
+
     # Latent head — float32 for numerical headroom on the L2 loss
-    hidden_dim = model.config.hidden_size if hasattr(model.config, "hidden_size") else model.config.text_config.hidden_size
+    base_cfg = model.base_model.model.config if hasattr(model, "base_model") else model.config
+    hidden_dim = base_cfg.hidden_size if hasattr(base_cfg, "hidden_size") else base_cfg.text_config.hidden_size
     latent_head = LatentHead(hidden_dim=hidden_dim, target_dim=target_dim).to(dtype=torch.float32)
 
     return ModelHandles(

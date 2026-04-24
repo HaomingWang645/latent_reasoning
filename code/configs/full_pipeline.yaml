@@ -3,7 +3,7 @@
 # Each stage subsection is consumed by its own trainer. Common settings live at
 # the top so changes propagate (e.g., backbone, dataset, GPUs).
 
-run_root: full_pipeline_v2
+run_root: full_pipeline_v3
 output_root: /mnt/data3/haoming_x_spatial_scratch/latent_reasoning_runs
 
 # ---- shared model + data ----
@@ -13,7 +13,10 @@ model:
   siglip_path: /mnt/data3/haoming_x_spatial_scratch/latent_reasoning_runs/hf_cache/siglip-base-patch16-224
   view_idx_pose_dim: 64
   max_views_per_sample: 4
+  min_views_per_sample: 4          # VGGT: only 4-view samples (cleanest batches)
   freeze_vision_tower: true
+  target_encoder: vggt             # <-- pathway 1 activated
+  vggt_target_dim: 2048            # VGGT-1B aggregator dim
   lora:
     enabled: true
     r: 16
@@ -25,12 +28,14 @@ data:
   mindcube_root: /home/haoming/mindcube_data
   train_jsonl: /home/haoming/mindcube_data/raw/MindCube_train.jsonl
   eval_jsonl: /home/haoming/mindcube_data/raw/MindCube_tinybench.jsonl
-  num_workers: 6                # bumped to keep up with batch=2
+  vggt_cache_train: /mnt/data3/haoming_x_spatial_scratch/latent_reasoning_runs/vggt_cache/MindCube_train
+  vggt_cache_eval:  /mnt/data3/haoming_x_spatial_scratch/latent_reasoning_runs/vggt_cache/MindCube_tinybench
+  num_workers: 8                   # bumped for batch=4
   prefetch_factor: 4
 
 # ---- per-stage ----
 stage1_align:
-  run_name: full_pipeline_v2_stage1
+  run_name: full_pipeline_v3_stage1
   num_train_steps: 2000          # large-scale: 4× pilot
   micro_batch_size: 1
   grad_accum_steps: 4
@@ -53,11 +58,11 @@ stage1_align:
   log_every_n_steps: 10
 
 stage2_ground:
-  run_name: full_pipeline_v2_stage2
-  init_from: full_pipeline_v2_stage1
+  run_name: full_pipeline_v3_stage2
+  init_from: full_pipeline_v3_stage1
   num_train_steps: 30000          # large-scale: 6× pilot, ~36 epochs over MindCube
-  micro_batch_size: 2             # bumped from 1 — saturates GPU memory (~64GB / 80GB)
-  grad_accum_steps: 2             # halved correspondingly; effective batch = 12 unchanged
+  micro_batch_size: 4             # VGGT mode: batch=4 per device; much denser
+  grad_accum_steps: 1             # effective batch = 12 (4 × 3 GPUs)
   lr_backbone: 2.0e-5
   lr_heads: 1.0e-4
   weight_decay: 0.01
@@ -77,11 +82,11 @@ stage2_ground:
   log_every_n_steps: 25
 
 stage3_e2e:
-  run_name: full_pipeline_v2_stage3
-  init_from: full_pipeline_v2_stage2
+  run_name: full_pipeline_v3_stage3
+  init_from: full_pipeline_v3_stage2
   num_train_steps: 15000          # large-scale: 5× pilot
-  micro_batch_size: 2             # bumped (matches stage 2)
-  grad_accum_steps: 2
+  micro_batch_size: 4             # bumped (matches stage 2)
+  grad_accum_steps: 1
   lr_backbone: 1.0e-5
   lr_heads: 5.0e-5
   weight_decay: 0.01
@@ -103,8 +108,8 @@ stage3_e2e:
   log_every_n_steps: 25
 
 stage4_grpo:
-  run_name: full_pipeline_v2_stage4
-  init_from: full_pipeline_v2_stage3
+  run_name: full_pipeline_v3_stage4
+  init_from: full_pipeline_v3_stage3
   num_train_steps: 1500            # large-scale: capped (v3 showed regression past ~1000)
   micro_batch_size: 1
   num_generations: 4

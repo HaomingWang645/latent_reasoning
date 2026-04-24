@@ -43,6 +43,7 @@ class CollatedBatch:
     target_view_indices: torch.Tensor    # (Σviews,) per-view in-sample index for PoseEnc
     target_batch_idx: torch.Tensor       # (Σviews,) which batch each target belongs to
     n_views_per_sample: list[int]
+    target_features: torch.Tensor | None = None  # (Σviews, target_dim) — cached VGGT, fp16
 
 
 def make_collate_fn(processor: AutoProcessor, lts_id: int, lat_id: int, lte_id: int):
@@ -105,12 +106,22 @@ def make_collate_fn(processor: AutoProcessor, lts_id: int, lat_id: int, lte_id: 
         target_view_indices = []
         target_batch_idx = []
         n_views_per_sample = []
+        target_feat_chunks = []
+        any_vggt = False
         for b, s in enumerate(samples):
             n_views_per_sample.append(s.n_views)
             for k, img in enumerate(s.images):
                 target_pil.append(img)
                 target_view_indices.append(k)
                 target_batch_idx.append(b)
+            if s.vggt_features is not None:
+                any_vggt = True
+                target_feat_chunks.append(torch.from_numpy(s.vggt_features[:s.n_views]))
+
+        target_features = None
+        if any_vggt and len(target_feat_chunks) == len(samples):
+            # (Σviews, target_dim)
+            target_features = torch.cat(target_feat_chunks, dim=0)
 
         return CollatedBatch(
             input_ids=input_ids,
@@ -122,6 +133,7 @@ def make_collate_fn(processor: AutoProcessor, lts_id: int, lat_id: int, lte_id: 
             target_view_indices=torch.tensor(target_view_indices, dtype=torch.long),
             target_batch_idx=torch.tensor(target_batch_idx, dtype=torch.long),
             n_views_per_sample=n_views_per_sample,
+            target_features=target_features,
         )
 
     return collate

@@ -27,7 +27,7 @@ while [ $# -gt 0 ]; do
 done
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3,5}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3,4,5,6}  # 5 H100s
 export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="$PWD"
 export HF_HOME=${HF_HOME:-/home/haoming/.cache/huggingface}
@@ -59,8 +59,8 @@ run_stage4_dist() {
     "$TORCHRUN" --standalone --nproc_per_node=$NPROC --master_port=29513 \
         -m src.train.stage4_grpo_dist \
         --config "$CFG" \
-        --init_run_name full_pipeline_v2_stage3 \
-        --ref_run_name  full_pipeline_v2_stage3 \
+        --init_run_name full_pipeline_v3_stage3 \
+        --ref_run_name  full_pipeline_v3_stage3 \
         --run_suffix _grpo \
         --w_correct 1.0 --w_format 0.05 --format_gates_correct 0 \
         2>&1 | tee -a "$LOG_FILE"

@@ -148,7 +148,12 @@ def forward_one_batch(handles, target_builder, batch, device, scfg, dtype, lts_i
     pixel_values = batch.pixel_values.to(device, non_blocking=True) if batch.pixel_values is not None else None
     image_grid_thw = batch.image_grid_thw.to(device, non_blocking=True) if batch.image_grid_thw is not None else None
 
-    targets = target_builder(batch.target_pil_images, batch.target_view_indices)
+    # Prefer cached VGGT features from the loader if present; else fall back to
+    # live SigLIP+PoseEnc computation.
+    if getattr(batch, "target_features", None) is not None:
+        targets = batch.target_features.to(device, dtype=torch.float32, non_blocking=True)
+    else:
+        targets = target_builder(batch.target_pil_images, batch.target_view_indices)
 
     out = handles.model(
         input_ids=input_ids,
@@ -234,12 +239,21 @@ def main():
         freeze_vision_tower=cfg["model"].get("freeze_vision_tower", True),
         lora_cfg=cfg["model"].get("lora"),
     )
-    siglip = FrozenSigLIPEncoder(cfg["model"]["siglip_path"], dtype=dtype)
-    pose_enc = ViewIdxPoseEncoder(max_views=cfg["model"]["max_views_per_sample"] * 2,
-                                  dim=cfg["model"]["view_idx_pose_dim"])
-    target_builder = TargetBuilder(siglip, pose_enc).to(device)
-    target_builder.eval()
-    target_dim = target_builder.target_dim
+
+    # Target-encoder selection: "vggt" (cached) or "siglip_pose" (live)
+    target_mode = cfg["model"].get("target_encoder", "siglip_pose")
+    if target_mode == "vggt":
+        target_builder = None
+        target_dim = cfg["model"].get("vggt_target_dim", 2048)
+        logger.print(f"[target] vggt cached mode, target_dim={target_dim}")
+    else:
+        siglip = FrozenSigLIPEncoder(cfg["model"]["siglip_path"], dtype=dtype)
+        pose_enc = ViewIdxPoseEncoder(max_views=cfg["model"]["max_views_per_sample"] * 2,
+                                      dim=cfg["model"]["view_idx_pose_dim"])
+        target_builder = TargetBuilder(siglip, pose_enc).to(device)
+        target_builder.eval()
+        target_dim = target_builder.target_dim
+        logger.print(f"[target] siglip+pose live mode, target_dim={target_dim}")
 
     handles.latent_head = LatentHead(hidden_dim=handles.hidden_dim, target_dim=target_dim).to(device, dtype=torch.float32)
     handles.target_dim = target_dim
@@ -272,10 +286,13 @@ def main():
                        + sum(p.numel() for p in handles.latent_head.parameters() if p.requires_grad)
     logger.print(f"trainable_params={n_params_trainable/1e6:.1f}M | target_dim={target_dim}")
 
+    vggt_cache_train = cfg["data"].get("vggt_cache_train") if target_mode == "vggt" else None
     train_ds = MindCubeDataset(
         jsonl_path=cfg["data"]["train_jsonl"],
         image_root=cfg["data"]["mindcube_root"],
         max_views=cfg["model"]["max_views_per_sample"],
+        min_views=cfg["model"].get("min_views_per_sample", cfg["model"]["max_views_per_sample"] if target_mode == "vggt" else 2),
+        vggt_cache_dir=vggt_cache_train,
     )
     sampler = DistributedSampler(train_ds, num_replicas=world, rank=rank, shuffle=True, seed=0) if world > 1 else None
     collate = make_collate_fn(handles.processor, handles.lts_id, handles.lat_id, handles.lte_id)
@@ -394,6 +411,43 @@ def main():
         logger.print(f"[done] {args.stage} complete")
         ckpt_path = ckpt.latest().name if ckpt.latest() else "(none)"
         mdlog.log_stage_end(output_root, args.stage, accum, ckpt_path)
+
+        # End-of-stage OOD eval: MindCube tinybench (held out) + MMSI-Bench (OOD)
+        try:
+            logger.print("[post-stage eval] running MindCube tinybench + MMSI-Bench ...")
+            ec = cfg.get("eval_daemon", {})
+            ec.setdefault("eval_jsonl", cfg["data"]["eval_jsonl"])
+            # MindCube tinybench
+            mc = run_eval(
+                handles,
+                eval_jsonl=ec["eval_jsonl"],
+                image_root=cfg["data"]["mindcube_root"],
+                max_samples=ec.get("max_eval_samples", 500),
+                max_views=cfg["model"]["max_views_per_sample"],
+            )
+            # MMSI-Bench
+            from src.eval.mmsi_bench import run_mmsi_eval
+            mmsi = run_mmsi_eval(
+                handles,
+                max_samples=500,
+                max_views=cfg["model"]["max_views_per_sample"],
+            )
+            results = {
+                "MindCube_tinybench": {
+                    "n_samples": mc.n_samples, "accuracy": mc.accuracy,
+                    "format_rate": mc.format_rate, "wall_s": mc.wall_seconds,
+                },
+                "MMSI-Bench": {
+                    "n_samples": mmsi.n_samples, "accuracy": mmsi.accuracy,
+                    "format_rate": mmsi.format_rate, "wall_s": mmsi.wall_seconds,
+                    "per_type": mmsi.per_type_accuracy,
+                },
+            }
+            logger.print(f"[post-stage eval] MindCube acc={mc.accuracy:.3f} fmt={mc.format_rate:.3f} | "
+                         f"MMSI-Bench acc={mmsi.accuracy:.3f} fmt={mmsi.format_rate:.3f}")
+            mdlog.log_eval(output_root, ckpt_path, args.stage, step, results)
+        except Exception as e:
+            logger.print(f"[post-stage eval] FAILED: {type(e).__name__}: {e}")
     logger.close()
     if dist.is_initialized():
         dist.destroy_process_group()

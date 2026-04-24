@@ -440,11 +440,36 @@ def main():
 
     if is_main():
         logger.print("[done] stage4_grpo_dist complete")
+        ckpt_path = ckpt.latest().name if ckpt.latest() else ""
         mdlog.log_stage_end(output_root, "stage4_grpo_dist",
                             {"reward_mean": float(rewards.mean()) if 'rewards' in locals() else 0.0,
                              "kl_loss": float(kl_loss.mean()) if 'kl_loss' in locals() else 0.0,
                              "loss": float(loss) if 'loss' in locals() else 0.0},
-                            ckpt.latest().name if ckpt.latest() else "")
+                            ckpt_path)
+        # End-of-stage OOD eval
+        try:
+            from src.eval.mmsi_bench import run_mmsi_eval
+            logger.print("[post-stage eval] MindCube tinybench + MMSI-Bench ...")
+            mc = run_eval(
+                handles,
+                eval_jsonl=cfg["eval_daemon"]["eval_jsonl"],
+                image_root=cfg["data"]["mindcube_root"],
+                max_samples=cfg["eval_daemon"].get("max_eval_samples", 500),
+                max_views=cfg["model"]["max_views_per_sample"],
+            )
+            mmsi = run_mmsi_eval(handles, max_samples=500,
+                                 max_views=cfg["model"]["max_views_per_sample"])
+            results = {
+                "MindCube_tinybench": {"n_samples": mc.n_samples, "accuracy": mc.accuracy,
+                                       "format_rate": mc.format_rate, "wall_s": mc.wall_seconds},
+                "MMSI-Bench": {"n_samples": mmsi.n_samples, "accuracy": mmsi.accuracy,
+                               "format_rate": mmsi.format_rate, "wall_s": mmsi.wall_seconds,
+                               "per_type": mmsi.per_type_accuracy},
+            }
+            logger.print(f"[post-stage eval] MindCube acc={mc.accuracy:.3f} | MMSI acc={mmsi.accuracy:.3f}")
+            mdlog.log_eval(output_root, ckpt_path, "stage4_grpo_dist", step, results)
+        except Exception as e:
+            logger.print(f"[post-stage eval] FAILED: {type(e).__name__}: {e}")
     logger.close()
     if dist.is_initialized():
         dist.destroy_process_group()

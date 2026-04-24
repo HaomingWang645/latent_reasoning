@@ -25,8 +25,8 @@ data:
   mindcube_root: /home/haoming/mindcube_data
   train_jsonl: /home/haoming/mindcube_data/raw/MindCube_train.jsonl
   eval_jsonl: /home/haoming/mindcube_data/raw/MindCube_tinybench.jsonl
-  num_workers: 4
-  prefetch_factor: 2
+  num_workers: 6                # bumped to keep up with batch=2
+  prefetch_factor: 4
 
 # ---- per-stage ----
 stage1_align:
@@ -56,8 +56,8 @@ stage2_ground:
   run_name: full_pipeline_v2_stage2
   init_from: full_pipeline_v2_stage1
   num_train_steps: 30000          # large-scale: 6× pilot, ~36 epochs over MindCube
-  micro_batch_size: 1
-  grad_accum_steps: 4
+  micro_batch_size: 2             # bumped from 1 — saturates GPU memory (~64GB / 80GB)
+  grad_accum_steps: 2             # halved correspondingly; effective batch = 12 unchanged
   lr_backbone: 2.0e-5
   lr_heads: 1.0e-4
   weight_decay: 0.01
@@ -80,8 +80,8 @@ stage3_e2e:
   run_name: full_pipeline_v2_stage3
   init_from: full_pipeline_v2_stage2
   num_train_steps: 15000          # large-scale: 5× pilot
-  micro_batch_size: 1
-  grad_accum_steps: 4
+  micro_batch_size: 2             # bumped (matches stage 2)
+  grad_accum_steps: 2
   lr_backbone: 1.0e-5
   lr_heads: 5.0e-5
   weight_decay: 0.01

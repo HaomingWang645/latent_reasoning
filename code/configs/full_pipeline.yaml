@@ -3,7 +3,7 @@
 # Each stage subsection is consumed by its own trainer. Common settings live at
 # the top so changes propagate (e.g., backbone, dataset, GPUs).
 
-run_root: full_pipeline_v1
+run_root: full_pipeline_v2
 output_root: /mnt/data3/haoming_x_spatial_scratch/latent_reasoning_runs
 
 # ---- shared model + data ----
@@ -30,14 +30,14 @@ data:
 
 # ---- per-stage ----
 stage1_align:
-  run_name: full_pipeline_v1_stage1
-  num_train_steps: 500
+  run_name: full_pipeline_v2_stage1
+  num_train_steps: 2000          # large-scale: 4× pilot
   micro_batch_size: 1
   grad_accum_steps: 4
   lr_head: 5.0e-4         # head/embeddings only — higher lr OK
   lr_backbone: 0.0        # backbone fully frozen
   weight_decay: 0.01
-  warmup_steps: 30
+  warmup_steps: 100
   cosine_schedule: true
   loss_lambda_latent: 1.0
   loss_lambda_text: 0.0   # stage 1 = latent only (no text supervision)
@@ -53,39 +53,39 @@ stage1_align:
   log_every_n_steps: 10
 
 stage2_ground:
-  run_name: full_pipeline_v1_stage2
-  init_from: full_pipeline_v1_stage1   # load model state from stage1 final
-  num_train_steps: 5000
+  run_name: full_pipeline_v2_stage2
+  init_from: full_pipeline_v2_stage1
+  num_train_steps: 30000          # large-scale: 6× pilot, ~36 epochs over MindCube
   micro_batch_size: 1
   grad_accum_steps: 4
   lr_backbone: 2.0e-5
   lr_heads: 1.0e-4
   weight_decay: 0.01
-  warmup_steps: 100
+  warmup_steps: 600
   cosine_schedule: true
   loss_lambda_latent: 1.0
   loss_lambda_text: 1.0
   loss_lambda_format: 0.5
-  infonce_start_step: 1500
+  infonce_start_step: 5000
   infonce_max_weight: 0.3
   precision: bf16
   gradient_checkpointing: true
   ckpt:
-    save_every_n_steps: 500
+    save_every_n_steps: 2500
     keep_last_n: 2
     save_optimizer_state: true
-  log_every_n_steps: 10
+  log_every_n_steps: 25
 
 stage3_e2e:
-  run_name: full_pipeline_v1_stage3
-  init_from: full_pipeline_v1_stage2
-  num_train_steps: 3000
+  run_name: full_pipeline_v2_stage3
+  init_from: full_pipeline_v2_stage2
+  num_train_steps: 15000          # large-scale: 5× pilot
   micro_batch_size: 1
   grad_accum_steps: 4
   lr_backbone: 1.0e-5
   lr_heads: 5.0e-5
   weight_decay: 0.01
-  warmup_steps: 60
+  warmup_steps: 300
   cosine_schedule: true
   loss_lambda_latent: 0.0   # KEY: drop latent supervision in stage 3
   loss_lambda_text: 1.0
@@ -95,25 +95,26 @@ stage3_e2e:
   scheduled_sampling:
     teacher_init: 0.8       # start at 80% teacher target injection
     teacher_final: 0.0      # decay to 0 (free generation)
-    decay_over_steps: 2000
+    decay_over_steps: 10000
   ckpt:
-    save_every_n_steps: 500
+    save_every_n_steps: 2000
     keep_last_n: 2
     save_optimizer_state: true
-  log_every_n_steps: 10
+  log_every_n_steps: 25
 
 stage4_grpo:
-  run_name: full_pipeline_v1_stage4
-  init_from: full_pipeline_v1_stage3
-  num_train_steps: 1000
+  run_name: full_pipeline_v2_stage4
+  init_from: full_pipeline_v2_stage3
+  num_train_steps: 1500            # large-scale: capped (v3 showed regression past ~1000)
   micro_batch_size: 1
-  num_generations: 4         # rollouts per prompt
+  num_generations: 4
   max_completion_length: 128
   lr: 5.0e-6
-  beta: 0.04                 # KL coef
+  beta: 0.04                       # KL coef (per plan)
   warmup_steps: 50
   reward_correct: 1.0
-  reward_format: 0.1
+  reward_format: 0.05              # smaller (was 0.1) — multiplicative reward in dist trainer
+  format_gates_correct: true
   precision: bf16
   ckpt:
     save_every_n_steps: 200

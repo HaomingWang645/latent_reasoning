@@ -52,20 +52,24 @@ run_stage() {
         --config "$CFG" --stage "$stage" $RESUME 2>&1 | tee -a "$LOG_FILE"
 }
 
-run_stage4() {
+run_stage4_dist() {
     echo "=========================================" | tee -a "$LOG_FILE"
-    echo " RUNNING stage4_grpo (single GPU) @ $(date)" | tee -a "$LOG_FILE"
+    echo " RUNNING stage4_grpo_dist (DDP) @ $(date)" | tee -a "$LOG_FILE"
     echo "=========================================" | tee -a "$LOG_FILE"
-    # Use the LARGEST GPU available for rollout headroom.
-    # In our setup that's GPU 5 (NVL 94GB). If unavailable, fall back to 2.
-    CUDA_VISIBLE_DEVICES=5 "$PY" -m src.train.stage4_grpo \
-        --config "$CFG" $RESUME 2>&1 | tee -a "$LOG_FILE"
+    "$TORCHRUN" --standalone --nproc_per_node=$NPROC --master_port=29513 \
+        -m src.train.stage4_grpo_dist \
+        --config "$CFG" \
+        --init_run_name full_pipeline_v2_stage3 \
+        --ref_run_name  full_pipeline_v2_stage3 \
+        --run_suffix _grpo \
+        --w_correct 1.0 --w_format 0.05 --format_gates_correct 0 \
+        2>&1 | tee -a "$LOG_FILE"
 }
 
 [ -z "$SKIP_S1" ] && run_stage stage1_align 29510
 [ -z "$SKIP_S2" ] && run_stage stage2_ground 29511
 [ -z "$SKIP_S3" ] && run_stage stage3_e2e 29512
-[ -z "$SKIP_S4" ] && run_stage4
+[ -z "$SKIP_S4" ] && run_stage4_dist
 
 echo "=========================================" | tee -a "$LOG_FILE"
 echo " PIPELINE COMPLETE @ $(date)" | tee -a "$LOG_FILE"

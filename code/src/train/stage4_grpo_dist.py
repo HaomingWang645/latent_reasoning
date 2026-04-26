@@ -52,7 +52,9 @@ from src.utils import training_log as mdlog
 
 def setup_dist():
     if not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
+        from datetime import timedelta
+        # Bumped from default 10min to 60min — ckpt saves block other ranks at the next all-reduce
+        dist.init_process_group(backend="nccl", timeout=timedelta(minutes=60))
     rank = dist.get_rank()
     world = dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", rank))
@@ -188,11 +190,16 @@ def main():
         freeze_vision_tower=cfg["model"].get("freeze_vision_tower", True),
         lora_cfg=cfg["model"].get("lora"),
     )
-    siglip = FrozenSigLIPEncoder(cfg["model"]["siglip_path"], dtype=dtype)
-    pose_enc = ViewIdxPoseEncoder(max_views=cfg["model"]["max_views_per_sample"] * 2,
-                                  dim=cfg["model"]["view_idx_pose_dim"])
-    target_builder = TargetBuilder(siglip, pose_enc).to(device)
-    target_dim = target_builder.target_dim
+    # Determine target_dim from config — must match the init/ref ckpt's saved LatentHead.
+    target_mode = cfg["model"].get("target_encoder", "siglip_pose")
+    if target_mode == "vggt":
+        target_dim = cfg["model"].get("vggt_target_dim", 2048)
+    else:
+        siglip = FrozenSigLIPEncoder(cfg["model"]["siglip_path"], dtype=dtype)
+        pose_enc = ViewIdxPoseEncoder(max_views=cfg["model"]["max_views_per_sample"] * 2,
+                                      dim=cfg["model"]["view_idx_pose_dim"])
+        target_builder = TargetBuilder(siglip, pose_enc).to(device)
+        target_dim = target_builder.target_dim
     handles.latent_head = LatentHead(hidden_dim=handles.hidden_dim, target_dim=target_dim).to(device, dtype=torch.float32)
     handles.target_dim = target_dim
     handles.model.to(device)
@@ -408,17 +415,24 @@ def main():
                     }, time.time() - train_t0,
                         extra=f"R={rewards.mean().item():.3f} kl={kl_value:.4f}")
 
-        if not args.smoke and is_main() and (step % scfg["ckpt"]["save_every_n_steps"] == 0 or step == total_steps):
-            t0 = time.time()
-            backbone_state = {k: v.detach().cpu() for k, v in handles.model.state_dict().items()
-                              if k in trainable_names}
-            head_state = {k: v.detach().cpu() for k, v in handles.latent_head.state_dict().items()}
-            ckpt.save(step=step,
-                      model_state={"backbone": backbone_state, "latent_head": head_state},
-                      optimizer_state=None, rng_state=None,
-                      meta={"stage": "stage4_grpo_dist",
-                            "reward_mean": float(rewards.mean()), "kl": kl_value})
-            logger.print(f"[ckpt] saved step {step} in {time.time()-t0:.1f}s | disk={ckpt.disk_usage_mb():.1f} MB")
+        if not args.smoke and (step % scfg["ckpt"]["save_every_n_steps"] == 0 or step == total_steps):
+            # All ranks barrier first so no rank fires next iter while main saves
+            if dist.is_initialized():
+                dist.barrier()
+            if is_main():
+                t0 = time.time()
+                backbone_state = {k: v.detach().cpu() for k, v in handles.model.state_dict().items()
+                                  if k in trainable_names}
+                head_state = {k: v.detach().cpu() for k, v in handles.latent_head.state_dict().items()}
+                ckpt.save(step=step,
+                          model_state={"backbone": backbone_state, "latent_head": head_state},
+                          optimizer_state=None, rng_state=None,
+                          meta={"stage": "stage4_grpo_dist",
+                                "reward_mean": float(rewards.mean()), "kl": kl_value})
+                logger.print(f"[ckpt] saved step {step} in {time.time()-t0:.1f}s | disk={ckpt.disk_usage_mb():.1f} MB")
+            # Re-barrier so other ranks wait until save is done
+            if dist.is_initialized():
+                dist.barrier()
 
         if (time.time() - last_eval_t) / 3600.0 >= args.eval_interval_hours and is_main():
             try:
